@@ -1,91 +1,76 @@
 <script setup lang="ts">
-// PlanCreateView — 手工新建计划（M3 会被首页 FirstPlanPrompt 替代）
+// PlanCreateView — 改造为 AI 生成入口（修订 electric-pulse）
+// 输入目标 + 场景 → 自动生成任务 → 直接跳今日看板
 import { ref, computed } from "vue";
 import { useRouter } from "vue-router";
-import { usePlanStore } from "@/stores/plan";
-import { useTaskStore } from "@/stores/task";
+import { api } from "@/api/client";
 
 const router = useRouter();
-const planStore = usePlanStore();
-const taskStore = useTaskStore();
 
-// 计划基本信息
-const title = ref("");
 const goal = ref("");
 const scenario = ref<"student" | "worker" | "kaoyan" | "cert">("worker");
-const weeks = ref(4);
-const weeklyHours = ref(8);
-const startDate = ref(new Date().toISOString().slice(0, 10));
-const endDate = computed(() => {
-  const d = new Date(startDate.value);
-  d.setDate(d.getDate() + weeks.value * 7);
-  return d.toISOString().slice(0, 10);
-});
-
-// 任务列表（手工添加）
-interface DraftTask {
-  title: string;
-  planned_date: string;
-  estimated_minutes: number;
-  stage_title: string;
-}
-const draftTasks = ref<DraftTask[]>([{ title: "", planned_date: startDate.value, estimated_minutes: 60, stage_title: "" }]);
+const generating = ref(false);
+const progressText = ref("");
 const error = ref<string>("");
 
-function addTask() {
-  draftTasks.value.push({
-    title: "",
-    planned_date: startDate.value,
-    estimated_minutes: 60,
-    stage_title: "",
-  });
+const scenarios = [
+  { value: "worker", label: "在职", desc: "每周 5-8h，周中晚上 + 周末" },
+  { value: "student", label: "学生", desc: "每周 15-20h，每天 2-3h" },
+  { value: "kaoyan", label: "考研", desc: "每周 25-30h，长周期 8-12 周" },
+  { value: "cert", label: "考证", desc: "按考试日倒推，每天 1-2h" },
+] as const;
+
+const canSubmit = computed(() => goal.value.trim().length > 0 && !generating.value);
+
+// 三阶段文字轮播
+let progressTimer: number | null = null;
+function startProgressAnimation() {
+  const stages = [
+    "🤔 理解目标…",
+    "📋 拆解阶段…",
+    "📅 排每日任务…",
+    "✨ 整理输出…",
+  ];
+  let i = 0;
+  progressText.value = stages[0];
+  progressTimer = window.setInterval(() => {
+    i = (i + 1) % stages.length;
+    progressText.value = stages[i];
+  }, 1500);
 }
 
-function removeTask(idx: number) {
-  draftTasks.value.splice(idx, 1);
+function stopProgressAnimation() {
+  if (progressTimer !== null) {
+    clearInterval(progressTimer);
+    progressTimer = null;
+  }
 }
 
 async function submit() {
+  if (!canSubmit.value) return;
+  generating.value = true;
   error.value = "";
-  if (!title.value.trim()) {
-    error.value = "标题不能为空";
-    return;
-  }
-  if (draftTasks.value.length === 0) {
-    error.value = "至少添加一个任务";
-    return;
-  }
-  if (draftTasks.value.some((t) => !t.title.trim())) {
-    error.value = "有任务标题为空";
-    return;
-  }
+  startProgressAnimation();
 
   try {
-    const plan = await planStore.create({
-      title: title.value,
-      goal: goal.value || undefined,
-      scenario: scenario.value,
-      origin: "manual",
-      weeks: weeks.value,
-      weekly_hours: weeklyHours.value,
-      start_date: startDate.value,
-      end_date: endDate.value,
-    });
-
-    // 创建任务
-    for (const t of draftTasks.value) {
-      await taskStore.createTask({
-        plan_id: plan.id,
-        title: t.title,
-        planned_date: t.planned_date,
-        estimated_minutes: t.estimated_minutes,
-        stage_title: t.stage_title || undefined,
-      });
+    const resp = await api.post<{ generation_id: number; plan_id: number; status: string }>(
+      "/plans/generate",
+      {
+        goal: goal.value.trim(),
+        scenario: scenario.value,
+      },
+      { timeout: 120000 }  // 60s 生成 + 缓冲
+    );
+    stopProgressAnimation();
+    if (resp.plan_id) {
+      // ★ 修订：生成完成直接进今日看板，顶部横幅后续做
+      router.push("/today");
     }
-
-    router.push(`/plans/${plan.id}`);
   } catch (e: any) {
-    error.value = e?.message || "创建失败";
+    stopProgressAnimation();
+    error.value = e?.message || "生成失败，请稍后重试";
+  } finally {
+    generating.value = false;
   }
 }
 </script>
@@ -93,83 +78,65 @@ async function submit() {
 <template>
   <div class="plan-create-view">
     <header class="view-header">
+      <button class="ghost-btn" @click="router.back()">←</button>
       <h1>新建学习计划</h1>
-      <button class="ghost-btn" @click="router.back()">取消</button>
     </header>
 
     <div v-if="error" class="error">{{ error }}</div>
 
-    <section class="form-section">
-      <h2>基本信息</h2>
-      <label>
-        <span class="label">标题</span>
-        <input v-model="title" placeholder="一句话说清学什么" type="text" />
-      </label>
-      <label>
-        <span class="label">目标</span>
-        <textarea v-model="goal" placeholder="可空，详细描述" rows="2"></textarea>
-      </label>
-      <div class="row">
-        <label>
-          <span class="label">场景</span>
-          <select v-model="scenario">
-            <option value="worker">在职</option>
-            <option value="student">学生</option>
-            <option value="kaoyan">考研</option>
-            <option value="cert">考证</option>
-          </select>
-        </label>
-        <label>
-          <span class="label">周数</span>
-          <input v-model.number="weeks" type="number" min="1" max="52" />
-        </label>
-        <label>
-          <span class="label">每周小时</span>
-          <input v-model.number="weeklyHours" type="number" min="1" max="168" />
-        </label>
+    <!-- 生成中遮罩 -->
+    <div v-if="generating" class="generating-overlay">
+      <div class="generating-card">
+        <div class="spinner"></div>
+        <div class="progress-text">{{ progressText }}</div>
+        <p class="hint">AI 正在为你拆解计划，预计 30-60 秒</p>
       </div>
-      <div class="row">
-        <label>
-          <span class="label">开始日期</span>
-          <input v-model="startDate" type="date" />
-        </label>
-        <label>
-          <span class="label">结束日期</span>
-          <input :value="endDate" type="date" readonly />
-        </label>
-      </div>
-    </section>
+    </div>
 
     <section class="form-section">
-      <h2>任务列表</h2>
-      <p class="hint">先手工加几个，验证 M1 流程。M3 上线后可以用 AI 自动拆解。</p>
-      <div v-for="(task, idx) in draftTasks" :key="idx" class="draft-task">
-        <input
-          v-model="task.title"
-          placeholder="任务标题"
-          type="text"
-          class="task-title-input"
-        />
-        <input v-model="task.planned_date" type="date" class="date-input" />
-        <input
-          v-model.number="task.estimated_minutes"
-          type="number"
-          min="5"
-          max="600"
-          placeholder="分钟"
-          class="minutes-input"
-        />
-        <input
-          v-model="task.stage_title"
-          placeholder="阶段"
-          class="stage-input"
-        />
-        <button class="ghost-btn remove-btn" @click="removeTask(idx)" type="button">×</button>
-      </div>
-      <button class="ghost-btn" @click="addTask" type="button">+ 添加任务</button>
-    </section>
+      <label class="goal-input">
+        <span class="label">学习目标</span>
+        <textarea
+          v-model="goal"
+          placeholder="一句话说清想学什么，如：一个月入门 LangGraph"
+          rows="3"
+          :disabled="generating"
+        ></textarea>
+      </label>
 
-    <button class="submit-btn" @click="submit">创建</button>
+      <div class="scenarios">
+        <span class="label">场景</span>
+        <div class="scenario-options">
+          <label
+            v-for="s in scenarios"
+            :key="s.value"
+            class="scenario-option"
+            :class="{ active: scenario === s.value }"
+          >
+            <input
+              type="radio"
+              v-model="scenario"
+              :value="s.value"
+              :disabled="generating"
+            />
+            <div class="scenario-label">{{ s.label }}</div>
+            <div class="scenario-desc">{{ s.desc }}</div>
+          </label>
+        </div>
+      </div>
+
+      <button
+        class="submit-btn touchable"
+        :disabled="!canSubmit"
+        @click="submit"
+      >
+        {{ generating ? "生成中…" : "✨ 让 AI 安排任务" }}
+      </button>
+
+      <p class="footnote">
+        提交后将自动拆解为阶段和每日任务，直接进入今日看板。
+      </p>
+    </section>
   </div>
 </template>
 
@@ -178,91 +145,138 @@ async function submit() {
   padding: 16px;
   max-width: 720px;
   margin: 0 auto;
+  position: relative;
 }
 .view-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  gap: 12px;
   margin-bottom: 16px;
 }
 .view-header h1 {
   font-size: 22px;
   margin: 0;
+  flex: 1;
+}
+.ghost-btn {
+  background: none;
+  border: 1px solid #ddd;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 14px;
 }
 .error {
-  padding: 8px 12px;
+  padding: 10px 14px;
   background: #fcebeb;
   color: #c00;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   margin-bottom: 12px;
   font-size: 13px;
 }
-.form-section {
+
+.generating-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.generating-card {
   background: #fff;
-  padding: 16px;
-  border-radius: var(--radius-md);
-  border: 1px solid #eee;
-  margin-bottom: 16px;
+  padding: 32px 40px;
+  border-radius: var(--radius-lg);
+  text-align: center;
+  min-width: 280px;
 }
-.form-section h2 {
-  font-size: 14px;
-  color: #534AB7;
-  margin: 0 0 12px;
+.spinner {
+  width: 48px;
+  height: 48px;
+  border: 4px solid #eee;
+  border-top-color: #534AB7;
+  border-radius: 50%;
+  margin: 0 auto 16px;
+  animation: spin 1s linear infinite;
 }
-.form-section label {
-  display: flex;
-  flex-direction: column;
-  margin-bottom: 12px;
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
-.label {
-  font-size: 12px;
-  color: #888;
-  margin-bottom: 4px;
-}
-input, textarea, select {
-  padding: 8px 10px;
-  border: 1px solid #ddd;
-  border-radius: var(--radius-sm);
-  font-size: 14px;
-  font-family: inherit;
-}
-.row {
-  display: flex;
-  gap: 10px;
-}
-.row label {
-  flex: 1;
+.progress-text {
+  font-size: 16px;
+  color: #1a1a1a;
+  margin-bottom: 8px;
+  font-weight: 500;
 }
 .hint {
   font-size: 12px;
   color: #888;
-  margin: 0 0 12px;
+  margin: 0;
 }
-.draft-task {
+
+.form-section {
+  background: #fff;
+  padding: 20px;
+  border-radius: var(--radius-md);
+  border: 1px solid #eee;
+}
+.goal-input {
   display: flex;
-  gap: 6px;
-  margin-bottom: 8px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  margin-bottom: 20px;
 }
-.task-title-input { flex: 2; min-width: 120px; }
-.date-input, .minutes-input, .stage-input { flex: 1; min-width: 80px; }
-.remove-btn {
-  padding: 0 8px;
-  background: none;
+.label {
+  font-size: 12px;
+  color: #888;
+  margin-bottom: 6px;
+  display: block;
+}
+textarea {
+  padding: 10px 12px;
   border: 1px solid #ddd;
-  color: #c00;
+  border-radius: var(--radius-sm);
+  font-size: 15px;
+  font-family: inherit;
+  resize: vertical;
+}
+
+.scenarios {
+  margin-bottom: 24px;
+}
+.scenario-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.scenario-option {
+  padding: 12px;
+  border: 1px solid #ddd;
   border-radius: var(--radius-sm);
   cursor: pointer;
+  display: block;
+  position: relative;
+  transition: all 0.15s;
 }
-.ghost-btn {
-  background: none;
-  border: 1px dashed #534AB7;
-  color: #534AB7;
-  padding: 6px 12px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  font-size: 13px;
+.scenario-option.active {
+  border-color: #534AB7;
+  background: #f0f0f5;
 }
+.scenario-option input {
+  position: absolute;
+  opacity: 0;
+}
+.scenario-label {
+  font-size: 14px;
+  font-weight: 500;
+  color: #1a1a1a;
+}
+.scenario-desc {
+  font-size: 11px;
+  color: #888;
+  margin-top: 4px;
+}
+
 .submit-btn {
   width: 100%;
   padding: 14px;
@@ -273,5 +287,17 @@ input, textarea, select {
   font-size: 15px;
   font-weight: 500;
   cursor: pointer;
+  transition: opacity 0.15s;
+}
+.submit-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.footnote {
+  font-size: 12px;
+  color: #888;
+  text-align: center;
+  margin: 12px 0 0;
 }
 </style>

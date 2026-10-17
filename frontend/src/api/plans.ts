@@ -16,4 +16,13 @@ export const plansApi = {
   delete: (id: number) => api.delete<void>(`/plans/${id}`),
 
   progress: (id: number) => api.get<PlanProgress>(`/plans/${id}/progress`),
+
+  // ★ AI 生成 — 修订 electric-pulse：goal + scenario → 直接拿 plan_id
+  generate: (goal: string, scenario: "student" | "worker" | "kaoyan" | "cert" = "worker", options?: { timeout?: number }) =>
+    api.post<{ generation_id: number; plan_id: number; status: string }>(
+      "/plans/generate",
+      { goal, scenario },
+      { timeout: options?.timeout ?? 120000 }
+    ),
 };
+
