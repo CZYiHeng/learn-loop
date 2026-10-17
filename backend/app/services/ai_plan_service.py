@@ -24,7 +24,7 @@ from app.schemas.plan import StudyPlanCreate
 
 logger = logging.getLogger("studyhub.ai.plan_service")
 
-PROMPT_VERSION = "plan-v1"
+PROMPT_VERSION = "plan-v2"  # v2: 加「按目标元素拆分」规则，修复泛化问题
 
 
 class AIPlanService:
